@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Live Server Dashbord</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                padding: 20px;
+            }
+            ul {
+                list-style-type: none;
+                padding: 0;
+            }
+            li {
+                margin: 10px 0;
+            }
+            a {
+                text-decoration: none;
+                color: #007bff;
+            }
+            a:hover {
+                text-decoration: underline;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>Live Server Dashboard</h1>
+        <ul id="link-list"></ul>
+
+        <script>
+            const socket = new WebSocket(`ws://${window.location.host}/ws`);
+
+            const links = new Map();
+
+            function updateList(name, url, added) {
+                const linkList = document.getElementById("link-list");
+                const linkId = `${name}-${url}`;
+
+                if (added) {
+                    if (!links.has(linkId)) {
+                        const listItem = document.createElement("li");
+                        listItem.id = linkId;
+
+                        const linkElement = document.createElement("a");
+                        linkElement.href = url;
+                        linkElement.textContent = name;
+                        linkElement.target = "_blank"; // Opens link in a new tab
+
+                        listItem.appendChild(linkElement);
+                        linkList.appendChild(listItem);
+
+                        links.set(linkId, listItem);
+                    }
+                } else {
+                    if (links.has(linkId)) {
+                        const listItem = links.get(linkId);
+                        listItem.remove();
+                        links.delete(linkId);
+                    }
+                }
+            }
+
+            socket.onmessage = function (event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    const { added, name, url } = data;
+
+                    updateList(name, url, added);
+                } catch (e) {
+                    console.error("Failed to process message", e);
+                }
+            };
+
+            // Example initial data (if needed for testing)
+            const initialData = { insert_here };
+
+            initialData.forEach(([name, url]) => {
+                updateList(name, url, true);
+            });
+        </script>
+    </body>
+</html>
