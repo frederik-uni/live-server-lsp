@@ -3,39 +3,34 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::fs::{read_dir, File as TokioFile, ReadDir};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
 use tower_lsp::lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams, CodeActionResponse, Command,
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    ExecuteCommandParams, InitializeParams, InitializeResult, InitializedParams, MessageType,
-    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    DidSaveTextDocumentParams, ExecuteCommandParams, InitializeParams, InitializeResult,
+    InitializedParams, MessageType, Position, SaveOptions, ServerCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions,
 };
 
-//TODO: incremental buffer
-//TODO: update not eager
-
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-
-use crate::dashboard::{self, get_port, report_port};
 
 struct Backend {
     port: u16,
     public: bool,
     eager: bool,
     client: Client,
-    threads: Arc<Mutex<Vec<JoinHandle<Result<(), rusty_live_server::Error>>>>>,
+    threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
     workspace_folders: Arc<Mutex<HashMap<PathBuf, (String, LspFileService)>>>,
 }
 
 #[derive(Clone)]
 struct LspFileService {
     eager: bool,
-    port: u16,
+    port: Arc<Mutex<u16>>,
     root: Arc<PathBuf>,
     files: Arc<Mutex<HashMap<String, String>>>,
     sig: Signal,
@@ -115,8 +110,22 @@ impl LanguageServer for Backend {
 
         if let Some((_, service)) = self.get_workspace_for_file(&uri).await {
             let mut files = service.files.lock().await;
-            files.insert(uri.clone(), content.clone());
-            self.update_file(&uri, &service).await;
+            if self.eager {
+                files.insert(uri.clone(), content.clone());
+            }
+            self.update_file(&uri, &service, false).await;
+        }
+    }
+
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        let uri = params.text_document.uri.to_string();
+        self.client
+            .log_message(MessageType::INFO, format!("abcd :{} ", uri))
+            .await;
+        if let Some((_, service)) = self.get_workspace_for_file(&uri).await {
+            let message = format!("File saved: {}", uri);
+            self.client.log_message(MessageType::INFO, message).await;
+            self.update_file(&uri, &service, true).await;
         }
     }
 
@@ -126,11 +135,20 @@ impl LanguageServer for Backend {
         if let Some((_, service)) = self.get_workspace_for_file(&uri).await {
             let mut files = service.files.lock().await;
             if let Some(file) = files.get_mut(&uri) {
-                for change in params.content_changes {
-                    *file = change.text.clone();
+                if self.eager {
+                    for change in params.content_changes {
+                        if let Some(range) = change.range {
+                            let start = get_byte_index_from_position(file, range.start);
+                            let end = get_byte_index_from_position(file, range.end);
+
+                            file.replace_range(start..end, &change.text);
+                        } else {
+                            *file = change.text.clone();
+                        }
+                    }
                 }
             }
-            self.update_file(&uri, &service).await;
+            self.update_file(&uri, &service, false).await;
         }
     }
 
@@ -145,7 +163,9 @@ impl LanguageServer for Backend {
         if params.command == "openProjectsWeb" {
             if let Some(project) = params.arguments.first().and_then(|arg| arg.as_str()) {
                 if let Some((_, v)) = self.workspace_folders.lock().await.get(Path::new(project)) {
-                    if let Err(e) = webbrowser::open(&format!("http://127.0.0.1:{}", v.port)) {
+                    if let Err(e) =
+                        webbrowser::open(&format!("http://127.0.0.1:{}", v.port.lock().await))
+                    {
                         self.client
                             .show_message(
                                 MessageType::WARNING,
@@ -211,10 +231,8 @@ impl LanguageServer for Backend {
                     .uri
                     .to_file_path()
                     .unwrap_or_else(|_| PathBuf::from(&folder.uri.to_string()));
-                let client = reqwest::Client::new();
-                let port = get_port(&client, self.port).await;
                 let fs = LspFileService {
-                    port,
+                    port: Arc::new(Mutex::new(self.port)),
                     sig: Signal::default(),
                     eager: self.eager,
                     files: Default::default(),
@@ -233,13 +251,21 @@ impl LanguageServer for Backend {
                     ..Default::default()
                 }),
 
-                text_document_sync: Some(TextDocumentSyncCapability::Options(
-                    TextDocumentSyncOptions {
+                text_document_sync: Some(TextDocumentSyncCapability::Options(match self.eager {
+                    true => TextDocumentSyncOptions {
                         open_close: Some(true),
-                        change: Some(TextDocumentSyncKind::FULL),
+                        change: Some(TextDocumentSyncKind::INCREMENTAL),
                         ..Default::default()
                     },
-                )),
+                    false => TextDocumentSyncOptions {
+                        open_close: Some(false),
+                        change: Some(TextDocumentSyncKind::NONE),
+                        save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                            include_text: Some(false),
+                        })),
+                        ..Default::default()
+                    },
+                })),
                 ..Default::default()
             },
             ..Default::default()
@@ -252,30 +278,15 @@ impl LanguageServer for Backend {
     ) -> tower_lsp::jsonrpc::Result<Option<CodeActionResponse>> {
         let mut actions = vec![];
 
-        let action = CodeActionOrCommand::CodeAction(CodeAction {
-            title: format!("Open Dashboard: 127.0.0.1:{}", self.port),
-            kind: Some(CodeActionKind::EMPTY),
-            command: Some(Command {
-                title: format!("Open Dashboard: 127.0.0.1:{}", self.port),
-                command: "openProjectsWeb".to_string(),
-                arguments: Some(vec![]),
-            }),
-            edit: None,
-            diagnostics: None,
-            is_preferred: Some(false),
-            disabled: None,
-            data: None,
-        });
-
-        actions.push(action);
         let uri = params.text_document.uri.to_string();
 
         if let Some((_, service)) = self.get_workspace_for_file(&uri).await {
+            let port = *service.port.lock().await;
             let action = CodeActionOrCommand::CodeAction(CodeAction {
-                title: format!("Open Project: 127.0.0.1:{}", service.port),
+                title: format!("Open Project: 127.0.0.1:{}", port),
                 kind: Some(CodeActionKind::EMPTY),
                 command: Some(Command {
-                    title: format!("Open Project: 127.0.0.1:{}", service.port),
+                    title: format!("Open Project: 127.0.0.1:{}", port),
                     command: "openProjectWeb".to_string(),
                     arguments: Some(vec![Value::from(
                         service.root.to_str().unwrap_or_default().to_string(),
@@ -300,33 +311,27 @@ impl LanguageServer for Backend {
         let folders = self.workspace_folders.lock().await;
         let mut threads = vec![];
         for (path, (name, fs)) in folders.iter() {
-            threads.push(tokio::spawn(rusty_live_server::serve(
-                path.clone(),
-                fs.port,
-                self.public,
-                Some(fs.sig.clone()),
-                fs.clone(),
-            )));
-            let n = name.clone();
-            let p = fs.port;
-            let po = self.port;
-            tokio::spawn(async move {
-                sleep(Duration::from_millis(100)).await;
-                report_port(
-                    &reqwest::Client::default(),
-                    po,
-                    dashboard::Server {
-                        name: n,
-                        server: None,
-                        port: p,
-                    },
-                )
-                .await;
-            });
+            let path = path.clone();
+            let f = fs.clone();
+            let public = self.public;
+            threads.push(tokio::spawn(async move {
+                loop {
+                    let port = *f.port.clone().lock().await;
+                    let _ = rusty_live_server::serve(
+                        path.clone(),
+                        port,
+                        public,
+                        Some(f.sig.clone()),
+                        f.clone(),
+                    )
+                    .await;
+                    *f.port.lock().await += 1;
+                }
+            }));
             self.client
                 .log_message(
                     MessageType::INFO,
-                    format!("Opend Workspace: {} at port {}", name, fs.port),
+                    format!("Opend Workspace: {} at port {}", name, fs.port.lock().await),
                 )
                 .await;
         }
@@ -360,7 +365,7 @@ impl Backend {
         None
     }
 
-    async fn update_file(&self, uri: &str, service: &LspFileService) {
+    async fn update_file(&self, uri: &str, service: &LspFileService, saved: bool) {
         self.client
             .log_message(MessageType::INFO, format!("Uri updated: {}", uri))
             .await;
@@ -368,11 +373,20 @@ impl Backend {
         let rel = abs
             .strip_prefix(service.root.to_str().unwrap_or_default())
             .unwrap_or(abs);
-        self.call_custom_function(&service.root, Path::new(rel))
+        self.call_custom_function(&service.root, Path::new(rel), saved)
             .await;
     }
 
-    async fn call_custom_function(&self, workspace: &PathBuf, file_path: &Path) {
+    async fn call_custom_function(&self, workspace: &PathBuf, file_path: &Path, saved: bool) {
+        self.client
+            .log_message(MessageType::INFO, format!("{}", self.eager))
+            .await;
+        if !self.eager && !saved {
+            return;
+        }
+        self.client
+            .log_message(MessageType::INFO, format!("reload"))
+            .await;
         let mutex = self.workspace_folders.lock().await;
         if let Some((_, fs)) = mutex.get(workspace) {
             fs.sig.send_signal(file_path.to_path_buf());
@@ -395,4 +409,37 @@ pub async fn lsp(port: u16, public: bool, eager: bool) {
     .finish();
 
     Server::new(stdin, stdout, server).serve(client).await;
+}
+
+pub fn get_byte_index_from_position(s: &str, position: Position) -> usize {
+    let line_start = index_of_first_char_in_line(s, position.line).unwrap_or(s.len());
+
+    let char_index = line_start + position.character as usize;
+
+    if char_index >= s.len() {
+        s.char_indices().nth(s.len() - 1).unwrap().0
+    } else {
+        s.char_indices().nth(char_index).unwrap().0
+    }
+}
+
+fn index_of_first_char_in_line(s: &str, line: u32) -> Option<usize> {
+    let mut current_line = 0;
+    let mut index = 0;
+
+    for (i, c) in s.char_indices() {
+        if c == '\n' {
+            current_line += 1;
+            if current_line == line {
+                return Some(i + 1);
+            }
+        }
+        index = i;
+    }
+
+    if current_line == line - 1 {
+        return Some(index + 1);
+    }
+
+    None
 }

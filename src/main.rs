@@ -1,25 +1,29 @@
-use std::time::Duration;
-
-use dashboard::{check_server, start_server};
+use clap::Parser;
 use lsp::lsp;
-use reqwest::Client;
-use tokio::time::sleep;
 
-mod dashboard;
 pub mod lsp;
 
-#[rocket::main]
-async fn main() {
-    let port = 57391;
-    if !check_server(
-        &Client::new(),
-        format!("http://127.0.1:{}", port).parse().unwrap(),
-    )
-    .await
-    {
-        tokio::spawn(start_server(port));
-        sleep(Duration::from_secs(1)).await;
-    }
+#[derive(Parser, Debug)]
+#[command(name = "LiveServer")]
+#[command(about = "configure the live server")]
+struct Cli {
+    /// Set the eager flag
+    #[arg(short, long)]
+    eager: bool,
 
-    lsp(port, true, true).await;
+    /// Set the public flag
+    #[arg(long)]
+    public: bool,
+
+    /// Set the port number
+    #[arg(short, long, value_name = "PORT")]
+    port: Option<u16>,
+}
+
+#[tokio::main]
+async fn main() {
+    let args = Cli::parse();
+    let port = args.port.unwrap_or(57391);
+
+    lsp(port, args.public, args.eager).await;
 }
