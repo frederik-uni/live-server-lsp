@@ -119,9 +119,6 @@ impl LanguageServer for Backend {
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
-        self.client
-            .log_message(MessageType::INFO, format!("abcd :{} ", uri))
-            .await;
         if let Some((_, service)) = self.get_workspace_for_file(&uri).await {
             let message = format!("File saved: {}", uri);
             self.client.log_message(MessageType::INFO, message).await;
@@ -156,10 +153,6 @@ impl LanguageServer for Backend {
         &self,
         params: ExecuteCommandParams,
     ) -> tower_lsp::jsonrpc::Result<Option<Value>> {
-        self.client
-            .show_message(MessageType::INFO, "run command")
-            .await;
-
         if params.command == "openProjectsWeb" {
             if let Some(project) = params.arguments.first().and_then(|arg| arg.as_str()) {
                 if let Some((_, v)) = self.workspace_folders.lock().await.get(Path::new(project)) {
@@ -367,7 +360,7 @@ impl Backend {
 
     async fn update_file(&self, uri: &str, service: &LspFileService, saved: bool) {
         self.client
-            .log_message(MessageType::INFO, format!("Uri updated: {}", uri))
+            .log_message(MessageType::INFO, format!("File updated: {}", uri))
             .await;
         let abs = uri.strip_prefix("file://").unwrap_or(uri);
         let rel = abs
@@ -378,9 +371,6 @@ impl Backend {
     }
 
     async fn call_custom_function(&self, workspace: &PathBuf, file_path: &Path, saved: bool) {
-        self.client
-            .log_message(MessageType::INFO, format!("{}", self.eager))
-            .await;
         if !self.eager && !saved {
             return;
         }

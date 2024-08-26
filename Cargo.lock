@@ -486,7 +486,7 @@ checksum = "d8adc4bb1803a324070e64a98ae98f38934d91957a99cfb3a43dcbc01bc56439"
 
 [[package]]
 name = "live-server-lsp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "clap",
  "rusty-live-server",
