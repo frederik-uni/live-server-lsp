@@ -414,6 +414,9 @@ pub fn get_byte_index_from_position(s: &str, position: Position) -> usize {
 }
 
 fn index_of_first_char_in_line(s: &str, line: u32) -> Option<usize> {
+    if line == 0 {
+        return Some(0);
+    }
     let mut current_line = 0;
     let mut index = 0;
 
