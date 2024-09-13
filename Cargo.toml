@@ -1,12 +1,12 @@
 [package]
 name = "live-server-lsp"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 
 [dependencies]
 tokio = {version = "1.39", features = ["fs", "io-std", "sync", "rt-multi-thread"]}
 tower-lsp = "0.20.0"
+serde = { version = "1.0.209", features = ["derive"]}
 serde_json = "1.0.127"
 rusty-live-server = { git = "https://github.com/frederik-uni/rusty-live-server", default-features = false }
 webbrowser = "1.0.1"
-clap = { version = "4.5.16", features = ["derive"] }

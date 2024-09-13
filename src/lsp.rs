@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::{read_dir, File as TokioFile, ReadDir};
 use tokio::io::AsyncReadExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tower_lsp::lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams, CodeActionResponse, Command,
@@ -18,10 +18,12 @@ use tower_lsp::lsp_types::{
 
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
+use crate::Config;
+
 struct Backend {
-    port: u16,
-    public: bool,
-    eager: bool,
+    port: Arc<RwLock<u16>>,
+    public: Arc<RwLock<bool>>,
+    eager: Arc<RwLock<bool>>,
     client: Client,
     threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
     workspace_folders: Arc<Mutex<HashMap<PathBuf, (String, LspFileService)>>>,
@@ -110,7 +112,7 @@ impl LanguageServer for Backend {
 
         if let Some((_, service)) = self.get_workspace_for_file(&uri).await {
             let mut files = service.files.lock().await;
-            if self.eager {
+            if *self.eager.read().await {
                 files.insert(uri.clone(), content.clone());
             }
             self.update_file(&uri, &service, false).await;
@@ -132,7 +134,7 @@ impl LanguageServer for Backend {
         if let Some((_, service)) = self.get_workspace_for_file(&uri).await {
             let mut files = service.files.lock().await;
             if let Some(file) = files.get_mut(&uri) {
-                if self.eager {
+                if *self.eager.read().await {
                     for change in params.content_changes {
                         if let Some(range) = change.range {
                             let start = get_byte_index_from_position(file, range.start);
@@ -153,12 +155,17 @@ impl LanguageServer for Backend {
         &self,
         params: ExecuteCommandParams,
     ) -> tower_lsp::jsonrpc::Result<Option<Value>> {
-        if params.command == "openProjectsWeb" {
-            if let Some(project) = params.arguments.first().and_then(|arg| arg.as_str()) {
+        if params.command == "openProjectWeb" {
+            let mut args = params.arguments.iter();
+            if let (Some(project), Some(file)) = (
+                args.next().and_then(|arg| arg.as_str()),
+                args.next().and_then(|arg| arg.as_str()),
+            ) {
                 if let Some((_, v)) = self.workspace_folders.lock().await.get(Path::new(project)) {
-                    if let Err(e) =
-                        webbrowser::open(&format!("http://127.0.0.1:{}", v.port.lock().await))
-                    {
+                    if let Err(e) = webbrowser::open(&format!(
+                        "http://127.0.0.1:{}/{file}",
+                        v.port.lock().await
+                    )) {
                         self.client
                             .show_message(
                                 MessageType::WARNING,
@@ -179,21 +186,6 @@ impl LanguageServer for Backend {
                     "URL argument missing",
                 ));
             }
-        } else if params.command == "openProjectsWeb" {
-            self.client
-                .show_message(MessageType::INFO, "run openProjectsWeb")
-                .await;
-            if let Err(e) = webbrowser::open(&format!("http://127.0.0.1:{}", self.port)) {
-                self.client
-                    .show_message(
-                        MessageType::WARNING,
-                        format!("failed to open browser {}", e.to_string()),
-                    )
-                    .await;
-                return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                    "failed to open browser",
-                ));
-            }
         } else {
             return Err(tower_lsp::jsonrpc::Error::method_not_found());
         }
@@ -204,6 +196,17 @@ impl LanguageServer for Backend {
         &self,
         params: InitializeParams,
     ) -> tower_lsp::jsonrpc::Result<InitializeResult> {
+        let config: Config = params
+            .initialization_options
+            .map(serde_json::from_value)
+            .and_then(|v| v.ok())
+            .unwrap_or_default();
+        {
+            *self.eager.write().await = !config.lazy.unwrap_or_default();
+            *self.port.write().await = config.start_port.unwrap_or(57391);
+            *self.public.write().await = config.public.unwrap_or_default();
+        }
+
         if let Some(workspace_folders) = params.workspace_folders {
             let mut folders = self.workspace_folders.lock().await;
             for folder in workspace_folders {
@@ -225,9 +228,9 @@ impl LanguageServer for Backend {
                     .to_file_path()
                     .unwrap_or_else(|_| PathBuf::from(&folder.uri.to_string()));
                 let fs = LspFileService {
-                    port: Arc::new(Mutex::new(self.port)),
+                    port: Arc::new(Mutex::new(*self.port.read().await)),
                     sig: Signal::default(),
-                    eager: self.eager,
+                    eager: *self.eager.read().await,
                     files: Default::default(),
                     root: Arc::new(path.clone()),
                 };
@@ -240,25 +243,27 @@ impl LanguageServer for Backend {
                     tower_lsp::lsp_types::CodeActionProviderCapability::Simple(true),
                 ),
                 execute_command_provider: Some(tower_lsp::lsp_types::ExecuteCommandOptions {
-                    commands: vec!["openProjectWeb".to_string(), "openProjectsWeb".to_string()],
+                    commands: vec!["openProjectWeb".to_string()],
                     ..Default::default()
                 }),
 
-                text_document_sync: Some(TextDocumentSyncCapability::Options(match self.eager {
-                    true => TextDocumentSyncOptions {
-                        open_close: Some(true),
-                        change: Some(TextDocumentSyncKind::INCREMENTAL),
-                        ..Default::default()
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    match *self.eager.read().await {
+                        true => TextDocumentSyncOptions {
+                            open_close: Some(true),
+                            change: Some(TextDocumentSyncKind::INCREMENTAL),
+                            ..Default::default()
+                        },
+                        false => TextDocumentSyncOptions {
+                            open_close: Some(false),
+                            change: Some(TextDocumentSyncKind::NONE),
+                            save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                                include_text: Some(false),
+                            })),
+                            ..Default::default()
+                        },
                     },
-                    false => TextDocumentSyncOptions {
-                        open_close: Some(false),
-                        change: Some(TextDocumentSyncKind::NONE),
-                        save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
-                            include_text: Some(false),
-                        })),
-                        ..Default::default()
-                    },
-                })),
+                )),
                 ..Default::default()
             },
             ..Default::default()
@@ -275,15 +280,21 @@ impl LanguageServer for Backend {
 
         if let Some((_, service)) = self.get_workspace_for_file(&uri).await {
             let port = *service.port.lock().await;
+            let file = uri.strip_prefix("file://").unwrap_or(&uri);
+            let file = file
+                .strip_prefix(service.root.to_str().unwrap_or_default())
+                .unwrap_or(file);
+            let file = file.strip_prefix("/").unwrap_or(file);
             let action = CodeActionOrCommand::CodeAction(CodeAction {
-                title: format!("Open Project: 127.0.0.1:{}", port),
+                title: format!("Open in Browser({})", port),
                 kind: Some(CodeActionKind::EMPTY),
                 command: Some(Command {
-                    title: format!("Open Project: 127.0.0.1:{}", port),
+                    title: format!("Open in Browser({})", port),
                     command: "openProjectWeb".to_string(),
-                    arguments: Some(vec![Value::from(
-                        service.root.to_str().unwrap_or_default().to_string(),
-                    )]),
+                    arguments: Some(vec![
+                        Value::from(service.root.to_str().unwrap_or_default().to_string()),
+                        Value::from(file),
+                    ]),
                 }),
                 edit: None,
                 diagnostics: None,
@@ -306,7 +317,7 @@ impl LanguageServer for Backend {
         for (path, (name, fs)) in folders.iter() {
             let path = path.clone();
             let f = fs.clone();
-            let public = self.public;
+            let public = *self.public.read().await;
             threads.push(tokio::spawn(async move {
                 loop {
                     let port = *f.port.clone().lock().await;
@@ -371,7 +382,7 @@ impl Backend {
     }
 
     async fn call_custom_function(&self, workspace: &PathBuf, file_path: &Path, saved: bool) {
-        if !self.eager && !saved {
+        if !*self.eager.read().await && !saved {
             return;
         }
         self.client
@@ -384,17 +395,17 @@ impl Backend {
     }
 }
 
-pub async fn lsp(port: u16, public: bool, eager: bool) {
+pub async fn lsp() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
     let (client, server) = LspService::build(|client| Backend {
         client,
         workspace_folders: Default::default(),
-        port,
-        public,
-        eager,
         threads: Default::default(),
+        port: Default::default(),
+        public: Default::default(),
+        eager: Arc::new(RwLock::new(true)),
     })
     .finish();
 
@@ -402,6 +413,9 @@ pub async fn lsp(port: u16, public: bool, eager: bool) {
 }
 
 pub fn get_byte_index_from_position(s: &str, position: Position) -> usize {
+    if s.len() == 0 {
+        return 0;
+    }
     let line_start = index_of_first_char_in_line(s, position.line).unwrap_or(s.len());
 
     let char_index = line_start + position.character as usize;

@@ -1,29 +1,19 @@
-use clap::Parser;
 use lsp::lsp;
+use serde::{Deserialize, Serialize};
 
 pub mod lsp;
 
-#[derive(Parser, Debug)]
-#[command(name = "LiveServer")]
-#[command(about = "configure the live server")]
-struct Cli {
-    /// Set the eager flag
-    #[arg(short, long)]
-    eager: bool,
-
-    /// Set the public flag
-    #[arg(long)]
-    public: bool,
-
+#[derive(Deserialize, Serialize, Default)]
+pub struct Config {
+    /// Set if update on save or keypress [Default: false]
+    lazy: Option<bool>,
+    /// 0.0.0.0 or 127.0.0.1 [Default: false]
+    public: Option<bool>,
     /// Set the port number
-    #[arg(short, long, value_name = "PORT")]
-    port: Option<u16>,
+    start_port: Option<u16>,
 }
 
 #[tokio::main]
 async fn main() {
-    let args = Cli::parse();
-    let port = args.port.unwrap_or(57391);
-
-    lsp(port, args.public, args.eager).await;
+    lsp().await;
 }
