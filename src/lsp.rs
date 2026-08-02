@@ -487,53 +487,81 @@ pub async fn lsp() {
 }
 
 pub fn get_byte_index_from_position(s: &str, position: Position) -> usize {
-    if s.is_empty() {
-        return 0;
+    let mut line_start = 0;
+    let mut lines = s.split('\n');
+
+    for _ in 0..position.line {
+        let Some(line) = lines.next() else {
+            return s.len();
+        };
+        line_start += line.len() + 1;
     }
 
-    let line_start = index_of_first_char_in_line(s, position.line).unwrap_or(s.len());
+    let Some(line) = lines.next() else {
+        return s.len();
+    };
+    let target = position.character as usize;
+    let mut utf16_offset = 0;
 
-    let char_index = line_start + position.character as usize;
-
-    let char_count = s.chars().count();
-
-    if char_index >= char_count {
-        s.char_indices().last().map(|(i, _)| i).unwrap_or(0)
-    } else {
-        s.char_indices()
-            .nth(char_index)
-            .map(|(i, _)| i)
-            .unwrap_or(s.len())
-    }
-}
-
-fn index_of_first_char_in_line(s: &str, line: u32) -> Option<usize> {
-    if line == 0 {
-        return Some(0);
-    }
-    let mut current_line = 0;
-    let mut index = 0;
-
-    for (i, c) in s.char_indices() {
-        if c == '\n' {
-            current_line += 1;
-            if current_line == line {
-                return Some(i + 1);
-            }
+    for (byte_offset, character) in line.char_indices() {
+        if utf16_offset >= target {
+            return line_start + byte_offset;
         }
-        index = i;
+
+        let next_offset = utf16_offset + character.len_utf16();
+        if next_offset > target {
+            return line_start + byte_offset;
+        }
+        utf16_offset = next_offset;
     }
 
-    if current_line == line - 1 {
-        return Some(index + 1);
-    }
-
-    None
+    line_start + line.len()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_end_of_document_after_the_last_character() {
+        let content = "<h1>Hello</h1>";
+
+        assert_eq!(
+            get_byte_index_from_position(content, Position::new(0, 14)),
+            content.len()
+        );
+    }
+
+    #[test]
+    fn replaces_the_entire_document_without_retaining_its_last_character() {
+        let mut content = "<h1>Hello</h1>".to_string();
+        let start = get_byte_index_from_position(&content, Position::new(0, 0));
+        let end = get_byte_index_from_position(&content, Position::new(0, 14));
+
+        content.replace_range(start..end, "<!doctype html>");
+
+        assert_eq!(content, "<!doctype html>");
+    }
+
+    #[test]
+    fn maps_characters_relative_to_the_requested_line() {
+        let content = "切\nabc";
+
+        assert_eq!(
+            get_byte_index_from_position(content, Position::new(1, 1)),
+            5
+        );
+    }
+
+    #[test]
+    fn maps_utf16_positions_to_utf8_byte_offsets() {
+        let content = "a😀b";
+
+        assert_eq!(
+            get_byte_index_from_position(content, Position::new(0, 3)),
+            5
+        );
+    }
 
     #[test]
     fn makes_relative_url_path_for_file_under_workspace() {
