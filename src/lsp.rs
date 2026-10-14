@@ -563,30 +563,38 @@ mod tests {
         );
     }
 
+    fn user_dir() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\Users\PC021")
+        } else {
+            PathBuf::from("/home/pc021")
+        }
+    }
+
     #[test]
     fn makes_relative_url_path_for_file_under_workspace() {
-        let root = Path::new(r"C:\Users\PC021\Desktop");
-        let file = Path::new(r"C:\Users\PC021\Desktop\index.html");
+        let root = user_dir().join("Desktop");
+        let file = root.join("index.html");
 
-        assert_eq!(make_file_url_path(root, file), "index.html");
+        assert_eq!(make_file_url_path(&root, &file), "index.html");
     }
 
     #[test]
     fn encodes_unicode_and_reserved_characters() {
-        let root = Path::new(r"C:\Users\PC021\Desktop");
-        let file = Path::new(r"C:\Users\PC021\Desktop\index_切圖_模板 #1.html");
+        let root = user_dir().join("Desktop");
+        let file = root.join("index_切圖_模板 #1.html");
 
         assert_eq!(
-            make_file_url_path(root, file),
+            make_file_url_path(&root, &file),
             "index_%E5%88%87%E5%9C%96_%E6%A8%A1%E6%9D%BF%20%231.html"
         );
     }
 
     #[test]
     fn preserves_nested_relative_path_with_forward_slashes() {
-        let root = Path::new(r"C:\Users\PC021");
-        let file = Path::new(r"C:\Users\PC021\Desktop\demo file.html");
+        let root = user_dir();
+        let file = root.join("Desktop").join("demo file.html");
 
-        assert_eq!(make_file_url_path(root, file), "Desktop/demo%20file.html");
+        assert_eq!(make_file_url_path(&root, &file), "Desktop/demo%20file.html");
     }
 }
